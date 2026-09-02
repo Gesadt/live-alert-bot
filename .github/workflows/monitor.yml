@@ -1,0 +1,45 @@
+name: Stripchat Live Monitor
+
+on:
+  schedule:
+    # Every 10 minutes. Each run installs Chromium, so this leaves margin;
+    # tighten to */5 later if you want faster alerts (still free either way).
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {} # lets you trigger a manual run from the Actions tab
+
+permissions:
+  contents: write # needed so the workflow can commit the updated state.json
+
+concurrency:
+  group: stripchat-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright + Chromium
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Check Stripchat status
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          STRIPCHAT_USERNAMES: ${{ secrets.STRIPCHAT_USERNAMES }}
+          DISCORD_PING: "@here" # change to a role mention, or "" for no ping
+        run: python check_stripchat.py
+
+      - name: Commit updated state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          git diff --staged --quiet || git commit -m "Update state [skip ci]"
+          git push
