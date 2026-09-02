@@ -99,8 +99,7 @@ Action logs (all of which are publicly browsable once the repo is public):
 
 **Settings → Secrets and variables → Actions → New repository secret**
 - Name: `STRIPCHAT_USERNAMES`
-- Value: a comma-separated list, e.g. `JadeScarlet_LoveLace` or
-  `model_one,model_two`
+- Value: a comma-separated list, e.g. `model_one,model_two`
 
 `check_stripchat.py` reads this at runtime via `os.environ`. Log output
 uses a short one-way hash of each username instead of the plaintext, so
