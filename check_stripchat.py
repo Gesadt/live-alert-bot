@@ -241,12 +241,8 @@ async def main():
         print("[error] STRIPCHAT_USERNAMES secret is empty or not set")
         sys.exit(1)
 
-    is_first_run = not os.path.exists(STATE_FILE)
-    if is_first_run:
-        print("[info] no state.json found -- this looks like the first run. "
-              "Any models already live right now will be recorded silently "
-              "(no alert) so we don't ping for a stream that may have "
-              "already been running for a while before tracking started.")
+    if not os.path.exists(STATE_FILE):
+        print("[info] no state.json found -- this looks like the very first run.")
 
     state = load_state()
     dirty = False
@@ -260,22 +256,26 @@ async def main():
                 continue  # leave prior known state untouched on a failed check
 
             is_live = model.get("isLive") is True
+            is_new_key = key not in state
             was_live = state.get(key, False)
 
-            if is_live and not was_live:
-                if is_first_run:
-                    # Don't alert on the very first observation -- just
-                    # record it, so we don't fire a stale "went live" for
-                    # a stream that started before we were watching.
+            if is_new_key:
+                # First time we've ever seen THIS username (true first run,
+                # or a username added later) -- just record its current
+                # status without alerting, so we don't ping for a stream
+                # that may have already been running before we started
+                # watching it.
+                print(f"{state_key(username)}: first observation, isLive={is_live} "
+                      f"-- recording without alerting")
+                state[key] = is_live
+                dirty = True
+            elif is_live and not was_live:
+                alerted = send_alert(username, model)
+                if alerted:
                     state[key] = True
                     dirty = True
-                else:
-                    alerted = send_alert(username, model)
-                    if alerted:
-                        state[key] = True
-                        dirty = True
-                    # else: leave state as-is (not live) so this retries
-                    # again next run instead of being silently lost.
+                # else: leave state as-is (not live) so this retries
+                # again next run instead of being silently lost.
             elif (not is_live) and was_live:
                 state[key] = False
                 dirty = True
