@@ -27,8 +27,12 @@ payload = json.dumps(payload_dict).encode()
 
 print(f"Sending exact payload: {json.dumps(payload_dict, indent=2)}")
 
+# ?wait=true makes Discord return the actual created message object instead
+# of a bare 204 No Content -- that response includes mention_everyone, which
+# is Discord's own ground-truth record of whether this registered as a real
+# mention. This is definitive; visual highlighting alone is not.
 req = urllib.request.Request(
-    WEBHOOK_URL,
+    WEBHOOK_URL + ("&" if "?" in WEBHOOK_URL else "?") + "wait=true",
     data=payload,
     headers={
         "Content-Type": "application/json",
@@ -42,7 +46,11 @@ req = urllib.request.Request(
 
 try:
     with urllib.request.urlopen(req, timeout=15) as resp:
+        body = json.loads(resp.read().decode())
         print(f"Discord responded with status: {resp.status}")
+        print(f"mention_everyone (this is the ground truth): {body.get('mention_everyone')}")
+        print(f"mentions (users): {body.get('mentions')}")
+        print(f"mention_roles: {body.get('mention_roles')}")
 except urllib.error.HTTPError as e:
     body = e.read().decode(errors="replace")
     print(f"HTTPError {e.code}: {body}")
