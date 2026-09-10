@@ -46,10 +46,21 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if [ -f state.json ]; then
-            git add state.json
-            git diff --staged --quiet || git commit -m "Update state [skip ci]"
-            git push
-          else
+          if [ ! -f state.json ]; then
             echo "state.json not present this run -- nothing to commit"
+            exit 0
           fi
+          git add state.json
+          if git diff --staged --quiet; then
+            echo "No state changes to commit"
+            exit 0
+          fi
+          git commit -m "Update state [skip ci]"
+          for i in 1 2 3; do
+            git push && exit 0
+            echo "Push rejected (attempt $i) -- main moved on since checkout "\
+                 "(e.g. a manual code push landed mid-run). Pulling latest and retrying..."
+            git pull --rebase origin main
+          done
+          echo "Failed to push state.json after 3 attempts"
+          exit 1
