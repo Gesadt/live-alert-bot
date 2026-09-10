@@ -27,7 +27,13 @@ jobs:
       - name: Install Playwright + Chromium
         run: |
           pip install playwright
-          playwright install --with-deps chromium
+          for i in 1 2 3; do
+            playwright install --with-deps chromium && exit 0
+            echo "Install attempt $i failed (likely a transient apt mirror issue) -- retrying in 15s..."
+            sleep 15
+          done
+          echo "All 3 install attempts failed -- failing this step explicitly."
+          exit 1
 
       - name: Check Stripchat status
         env:
