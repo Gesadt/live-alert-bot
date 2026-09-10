@@ -295,3 +295,11 @@ step, with an explicit failure message if all attempts are exhausted
 scheduled workflow's own 10-minute cadence was already going to recover
 from this class of issue on its own; the retry mainly cuts down on noisy
 failed runs for short-lived blips.
+
+**v13 — Fixed a git push race condition.** A run failed with
+`! [rejected] main -> main (fetch first)` -- caused by `main` advancing
+(most likely a manual code push landing) while a scheduled run was still
+executing, so its `git push` was based on stale history by the time it
+reached that step. Added a retry loop that, on push rejection, pulls and
+rebases onto the latest `main` before trying again (up to 3 attempts),
+so this self-heals instead of failing the run outright.
