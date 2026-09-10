@@ -61,9 +61,10 @@ testing rather than assumption:
 |---|---|
 | `check_stripchat.py` | The production monitor — checks status, posts alerts. |
 | `test_webhook.py` | Standalone script to test the Discord webhook in isolation. |
+| `test_ping.py` (optional) | Isolated test of just the `@here` mention mechanism — sends the minimum payload needed and prints Discord's `mention_everyone` ground-truth field. Not needed for normal operation; useful only if mention/ping behavior needs debugging again. |
 | `.github/workflows/monitor.yml` | Scheduled workflow (every 10 min) that runs the monitor. |
 | `.github/workflows/test-webhook.yml` | Manual-trigger workflow to run the webhook test. |
-| `state.json` | Auto-created/committed by the workflow — tracks last-known live status per model. Don't edit by hand while the workflow is active. |
+| `state.json` | Auto-created/committed by the workflow — tracks last-known live status per model (keyed by a hash, not the plaintext username). Don't edit by hand while the workflow is active. |
 
 ## Setup
 
@@ -99,7 +100,7 @@ Action logs (all of which are publicly browsable once the repo is public):
 
 **Settings → Secrets and variables → Actions → New repository secret**
 - Name: `STRIPCHAT_USERNAMES`
-- Value: a comma-separated list, e.g. `model_one,model_two`
+- Value: a comma-separated list, e.g. `model_one` or `model_one,model_two`
 
 `check_stripchat.py` reads this at runtime via `os.environ`. Log output
 uses a short one-way hash of each username instead of the plaintext, so
@@ -138,19 +139,42 @@ default branch.
 
 ## Behavior notes
 
-- **First run is silent.** If a model is already live the very first time
-  `state.json` doesn't exist yet, that's recorded without sending an
-  alert — avoids pinging for a stream that may have already been running
-  for a while before tracking started. Every transition after that alerts
-  normally.
+- **First run is silent, per model.** If a specific username has never been
+  recorded in `state.json` before (true first-ever run, or a new username
+  added later), its current status is recorded without alerting — avoids
+  pinging for a stream that may have already been running before tracking
+  started. This is tracked per-username, not with one global flag, so
+  adding a second model later behaves correctly even if the first one
+  already has history.
 - **A failed Discord post doesn't lose the alert.** `send_alert()` retries
   up to 3 times; if it still fails, state is left as "not live" so the
   next scheduled run (≤10 min later) will detect the same transition and
   try again — no silent drops.
+- **`@here`/`@everyone` pings are explicit, not assumed.** The webhook
+  payload sets `allowed_mentions: {"parse": ["everyone", "roles"]}`
+  rather than relying on Discord's implicit default behavior for whether
+  a plain-text mention actually notifies people. To verify this for
+  yourself independent of how it looks visually: POST to the webhook URL
+  with `?wait=true` appended — Discord returns the actual created message
+  object, including a `mention_everyone` field, which is the definitive
+  ground truth (this is what `test_ping.py` does, if present in the repo).
+- **`@here` will never be clickable, in any channel, for anyone — that's
+  expected, not a bug.** `@everyone` is a real role every server has by
+  default, so clicking it shows that role's member list. `@here` is a
+  dynamic keyword ("whoever's online right now") with no actual role
+  behind it, so there's nothing for a click to look up.
 - **The thumbnail is dynamic, not a static profile photo.** The `og:image`
   URL encodes the model's fixed internal ID plus a snapshot timestamp that
   updates as Stripchat re-captures frames from the live feed, so each
   alert reflects a genuinely recent image, not a cached avatar.
+- **A failed Chromium install usually isn't your problem.** The install
+  step retries 3 times with a delay before failing the job outright — this
+  absorbs brief transient issues with upstream package mirrors (seen once:
+  a hash-mismatch on Google's own Chrome apt repo, which resolved on its
+  own after a few hours). The scheduled workflow keeps retrying every 10
+  minutes regardless, so a longer outage self-resolves on its own even
+  without manual intervention — the retry loop mainly reduces noisy failed
+  runs for short blips, it isn't the thing providing eventual recovery.
 - **GitHub auto-disables scheduled workflows after 60 days with zero
   commits to the repo.** In practice this shouldn't trigger, since
   `state.json` gets committed on every status change — but if alerts stop
@@ -237,3 +261,37 @@ switched all console/log output to use the same hash label, since Action
 run logs are also publicly browsable on a public repo. Net effect: the
 actual username now only ever appears in-memory during a run and in the
 Discord message itself, never in anything committed or logged.
+
+**v10 — Reliable, verifiable pings.** `@here` mentions were rendering as
+plain, non-highlighted text. Root cause: Discord's default behavior for
+whether a webhook's plain-text mention actually parses/notifies isn't
+something to rely on implicitly — fixed by explicitly setting
+`allowed_mentions: {"parse": ["everyone", "roles"]}` in the payload. Also
+established a way to verify this definitively rather than by eye:
+POSTing with `?wait=true` returns Discord's actual message object,
+including `mention_everyone` — ground truth, independent of how the
+message looks. Separately resolved a related non-bug: `@here` is never
+clickable in Discord, in any channel, because unlike `@everyone` (a real
+role with an actual member list) it's a dynamic keyword with nothing for
+a click to look up.
+
+**v11 — Fixed a state.json first-run bug.** On a true first run where a
+model was offline, `isLive` (false) matched the default "not previously
+seen" value (also false), so the code saw "no transition" and never
+wrote `state.json` at all — causing the workflow's commit step to fail
+outright (`pathspec 'state.json' did not match any files`). Fixed by
+tracking "have we ever recorded this specific username before" as its
+own condition, independent of whether the value happens to match a
+default. Also made the workflow's commit step tolerate `state.json`
+genuinely not existing, instead of hard-failing.
+
+**v12 — CI resilience against transient upstream failures.** A run
+failed on `playwright install --with-deps chromium` due to a hash
+mismatch on Google's own Chrome apt repository — a brief inconsistency
+on their end, confirmed transient (resolved on its own after a few
+hours). Added a 3-attempt retry with a short delay around the install
+step, with an explicit failure message if all attempts are exhausted
+(rather than silently proceeding into a confusing downstream error). The
+scheduled workflow's own 10-minute cadence was already going to recover
+from this class of issue on its own; the retry mainly cuts down on noisy
+failed runs for short-lived blips.
