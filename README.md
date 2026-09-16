@@ -139,6 +139,16 @@ default branch.
 
 ## Behavior notes
 
+- **Only genuinely public live status triggers an alert.** `isLive` can
+  be `true` while `status` is something like `"p2p"` (a private 1-on-1)
+  or `"exclusive"` — those aren't watchable by a general Discord
+  audience, so they're deliberately excluded even though Stripchat itself
+  reports the model as broadcasting. Only `status == "public"` counts.
+  This matches Stripchat's own internal definition of "genuinely live"
+  found during the original diagnostic. The log line shows both the raw
+  flag and the filtered result, e.g.
+  `isLive=True status='p2p' -> counts_as_live=False`, so it's clear when
+  a session is intentionally being skipped rather than missed.
 - **First run is silent, per model.** If a specific username has never been
   recorded in `state.json` before (true first-ever run, or a new username
   added later), its current status is recorded without alerting — avoids
@@ -303,3 +313,13 @@ executing, so its `git push` was based on stale history by the time it
 reached that step. Added a retry loop that, on push rejection, pulls and
 rebases onto the latest `main` before trying again (up to 3 attempts),
 so this self-heals instead of failing the run outright.
+
+**v14 — Don't alert for non-public live states.** Alerts were firing
+whenever `isLive` was `true`, even when `status` was something like
+`"p2p"` (private 1-on-1) or `"exclusive"` — sessions a general Discord
+audience can't actually watch. Changed the alert condition to require
+`status == "public"` specifically, matching Stripchat's own internal
+definition of "genuinely live" found during the original diagnostic.
+Both the raw flag and the filtered decision are logged, so a skipped
+non-public session is clearly visible rather than looking like a missed
+check.

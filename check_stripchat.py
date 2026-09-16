@@ -43,7 +43,7 @@ from playwright.async_api import async_playwright
 
 # ---- Configure your models via a GitHub Secret, not here ----
 # Set a repo secret named STRIPCHAT_USERNAMES with a comma-separated list,
-# e.g. "JadeScarlet_LoveLace" or "model_one,model_two". This keeps the
+# e.g. "model_one" or "model_one,model_two". This keeps the
 # actual username out of the source code entirely -- important once the
 # repo is public, since source code is the first thing anyone browsing
 # the repo sees.
@@ -140,10 +140,18 @@ async def check_live(browser, username: str):
         except Exception as e:
             print(f"[warn] {label}: og:image lookup failed ({e})")
 
-        is_live = model.get("isLive") is True
-        print(f"{label}: isLive={is_live} status={model.get('status')!r}")
+        raw_is_live = model.get("isLive") is True
+        status = model.get("status")
+        # Only alert for genuinely public live status. isLive can be True
+        # while status is something like "p2p" (a private 1-on-1) or
+        # "exclusive" -- those aren't watchable by a general Discord
+        # audience, so they shouldn't trigger a "come watch" alert even
+        # though the model is technically broadcasting.
+        is_live = raw_is_live and status == "public"
+        print(f"{label}: isLive={raw_is_live} status={status!r} -> counts_as_live={is_live}")
 
         model["_thumbnail_url"] = og_image  # stash for send_alert to use
+        model["_counts_as_live"] = is_live  # stash so main() uses the same logic
         return model
     except Exception as e:
         print(f"[warn] {label}: check failed ({e})")
@@ -255,7 +263,7 @@ async def main():
             if model is None:
                 continue  # leave prior known state untouched on a failed check
 
-            is_live = model.get("isLive") is True
+            is_live = model.get("_counts_as_live", False)
             is_new_key = key not in state
             was_live = state.get(key, False)
 
