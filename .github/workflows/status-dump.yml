@@ -1,0 +1,21 @@
+name: Status Dump Diagnostic
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install Playwright + Chromium
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+      - name: Dump raw model state
+        env:
+          STRIPCHAT_USERNAMES: ${{ secrets.STRIPCHAT_USERNAMES }}
+        run: python status_dump.py
