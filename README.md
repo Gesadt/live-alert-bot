@@ -6,7 +6,9 @@ nothing to host, nothing to pay for.
 
 ## How it works
 
-A GitHub Actions workflow runs on a schedule (every 10 minutes). Each run:
+A GitHub Actions workflow runs on a schedule (intended: every 10 minutes —
+see the "Reliable triggering" section below for why this needs an external
+trigger rather than GitHub's native schedule). Each run:
 
 1. Launches a real headless browser (Playwright/Chromium) and loads the
    model's public profile page (`stripchat.com/<username>`).
@@ -15,8 +17,9 @@ A GitHub Actions workflow runs on a schedule (every 10 minutes). Each run:
    badge — rather than calling Stripchat's internal API.
 3. Reads the page's `og:image` meta tag for a current thumbnail.
 4. Compares the live status to what it was last run (`state.json`,
-   committed back to the repo). On an offline → live transition, it posts
-   an embed to a Discord webhook with the thumbnail and a link.
+   committed back to the repo). On an offline → genuinely-public-live
+   transition, it posts an embed to a Discord webhook with the thumbnail
+   and a link.
 5. Only marks state as "live" if the Discord post actually succeeds — a
    failed post gets retried on the next run instead of being silently lost.
 
@@ -54,6 +57,52 @@ testing rather than assumption:
   `urllib` default (`Python-urllib/3.x`) is blocklisted by Discord's edge
   and returns a bare `403 Forbidden` with no explanation — fixed by
   sending a normal browser-style User-Agent.
+- **Alerts need an explicit `allowed_mentions` field** to reliably
+  highlight/notify on `@here`/`@everyone`, rather than depending on
+  Discord's implicit default parsing behavior.
+- **Only `status == "public"` counts as alert-worthy.** `isLive` can be
+  `true` during a private 1-on-1 (`status: "p2p"`) or other non-public
+  session — those aren't watchable by a general Discord audience.
+- **GitHub's native `schedule:` trigger is not reliably frequent enough**
+  for this use case — see "Reliable triggering" below.
+
+## Reliable triggering (important)
+
+GitHub's own `schedule:` cron trigger is explicitly documented as "best
+effort" and can be delayed significantly under platform load — in
+practice, for public repos (especially newer/lower-activity ones), a
+`*/10 * * * *` schedule was observed actually firing every 3–7 hours, not
+every 10 minutes. This is a long-documented, widely-reported platform
+limitation (the well-known `upptime` project has publicly documented the
+exact same issue for years), not anything specific to this repo's
+workflow file.
+
+Practically, this means a short live session could start and end entirely
+between two actual runs, and the alert would simply never fire.
+
+**The fix:** an external, reliable scheduler (we use the free
+[cron-job.org](https://cron-job.org)) calls GitHub's REST API every 10
+minutes to trigger a `workflow_dispatch` event instead of relying on the
+passive `schedule:` trigger. `workflow_dispatch`-triggered runs are
+reported (and confirmed in testing here) to fire reliably and near-
+instantly, unlike the native schedule event.
+
+Setup for this:
+1. Create a **fine-grained GitHub personal access token**, scoped to only
+   this one repository, with **Actions: Read and write** permission and
+   nothing else.
+2. Sign up free at cron-job.org and create a job that sends a `POST`
+   every 10 minutes to:
+   `https://api.github.com/repos/<owner>/<repo>/actions/workflows/monitor.yml/dispatches`
+   with headers `Authorization: Bearer <token>`,
+   `Accept: application/vnd.github+json`, `Content-Type: application/json`,
+   `X-GitHub-Api-Version: 2022-11-28`, and body `{"ref":"main"}`.
+3. The token lives only in cron-job.org's own config — never in this repo
+   or a GitHub Secret.
+
+The native `schedule:` trigger is left in the workflow file as a harmless
+backup — if it occasionally also fires, that's fine, since the script is
+idempotent and an extra check never causes a duplicate alert.
 
 ## Repo contents
 
@@ -62,7 +111,7 @@ testing rather than assumption:
 | `check_stripchat.py` | The production monitor — checks status, posts alerts. |
 | `test_webhook.py` | Standalone script to test the Discord webhook in isolation. |
 | `test_ping.py` (optional) | Isolated test of just the `@here` mention mechanism — sends the minimum payload needed and prints Discord's `mention_everyone` ground-truth field. Not needed for normal operation; useful only if mention/ping behavior needs debugging again. |
-| `.github/workflows/monitor.yml` | Scheduled workflow (every 10 min) that runs the monitor. |
+| `.github/workflows/monitor.yml` | Workflow that runs the monitor — triggered externally via `workflow_dispatch` (see "Reliable triggering"), with a native `schedule:` backup. |
 | `.github/workflows/test-webhook.yml` | Manual-trigger workflow to run the webhook test. |
 | `state.json` | Auto-created/committed by the workflow — tracks last-known live status per model (keyed by a hash, not the plaintext username). Don't edit by hand while the workflow is active. |
 
@@ -115,7 +164,12 @@ unchanged until manually removed. Since `state.json` auto-regenerates
 (the "first run" behavior silently re-records current status without
 alerting), it's safe to just delete it and let the next run recreate it.
 
-### 6. (Optional) Configure the ping and embed color
+### 6. Set up reliable triggering
+Follow the steps in "Reliable triggering" above (GitHub token +
+cron-job.org). This is required for alerts to actually fire promptly —
+without it, the workflow may only run every few hours.
+
+### 7. (Optional) Configure the ping and embed color
 In `.github/workflows/monitor.yml`:
 ```yaml
 env:
@@ -126,16 +180,14 @@ In `check_stripchat.py`:
 EMBED_COLOR = 0xFF3E7F  # decimal, not hex string
 ```
 
-### 7. Test each piece independently
+### 8. Test each piece independently
 - **Webhook only:** Actions tab → **Test Discord Webhook** → **Run workflow**.
   A "✅ Test message" should appear in Discord.
 - **Full monitor:** Actions tab → **Stripchat Live Monitor** → **Run workflow**.
-  Check the log for a line like `<username>: isLive=False status='off'`
-  (or `True`/`'public'` if currently live).
-
-Once both work, the schedule takes over automatically — no separate
-"enable" step is needed beyond the workflow file being committed to the
-default branch.
+  Check the log for a line like
+  `<hash>: isLive=False status='off' -> counts_as_live=False`.
+- **External trigger:** use cron-job.org's "Run now" to confirm a new
+  workflow run appears, triggered by `workflow_dispatch`.
 
 ## Behavior notes
 
@@ -158,8 +210,8 @@ default branch.
   already has history.
 - **A failed Discord post doesn't lose the alert.** `send_alert()` retries
   up to 3 times; if it still fails, state is left as "not live" so the
-  next scheduled run (≤10 min later) will detect the same transition and
-  try again — no silent drops.
+  next scheduled run will detect the same transition and try again — no
+  silent drops.
 - **`@here`/`@everyone` pings are explicit, not assumed.** The webhook
   payload sets `allowed_mentions: {"parse": ["everyone", "roles"]}`
   rather than relying on Discord's implicit default behavior for whether
@@ -181,16 +233,15 @@ default branch.
   step retries 3 times with a delay before failing the job outright — this
   absorbs brief transient issues with upstream package mirrors (seen once:
   a hash-mismatch on Google's own Chrome apt repo, which resolved on its
-  own after a few hours). The scheduled workflow keeps retrying every 10
-  minutes regardless, so a longer outage self-resolves on its own even
-  without manual intervention — the retry loop mainly reduces noisy failed
-  runs for short blips, it isn't the thing providing eventual recovery.
+  own after a few hours). An outage longer than the retry window
+  self-resolves on the next externally-triggered run regardless.
 - **GitHub auto-disables scheduled workflows after 60 days with zero
   commits to the repo.** In practice this shouldn't trigger, since
   `state.json` gets committed on every status change — but if alerts stop
   arriving, check the Actions tab for a disabled-workflow banner.
-- **Cron timing isn't exact to the minute** — GitHub can delay scheduled
-  runs slightly under platform load. Not significant for this use case.
+- **Triggering is external now, not GitHub's native cron** — see
+  "Reliable triggering" above. Don't rely on the `schedule:` line in
+  `monitor.yml` alone.
 
 ## If it stops working
 
@@ -198,18 +249,29 @@ This reads Stripchat's own internal page structure and meta tags, which
 aren't a published stable API — they can change this at any time without
 notice. If the Actions log shows:
 ```
-[warn] <username>: couldn't find embedded state (Stripchat may have changed their page structure)
+[warn] <hash>: couldn't find embedded state (Stripchat may have changed their page structure, or this was a transient load issue). page_title=... html_length=... script_blocks_found=...
 ```
-that means the `viewCamBase.model` path moved or was renamed. The fix is
-the same process used to find it originally: load the page, dump all
-`<script>` tag contents, and search for the new field names (search for
-`"isLive"` specifically — it's a fairly stable, low-level field name even
-if the surrounding object structure changes).
+First check whether this resolves on its own on the next run (it often
+does — this has shown up as a one-off transient hiccup more than once,
+not an actual page-structure change). The warning now includes page
+title, content length, and script-block count specifically so a *real*
+structural change is distinguishable from a transient blip at a glance —
+a tiny page or odd title points to an actual change; a normal-looking
+page with the state simply missing points more toward something shifting
+in how the state is embedded specifically. If it persists across multiple
+runs, the fix is the same process used to find it originally: load the
+page, dump all `<script>` tag contents, and search for the new field
+names (search for `"isLive"` specifically — it's a fairly stable,
+low-level field name even if the surrounding object structure changes).
 
 If thumbnails stop appearing specifically (while `isLive` detection still
 works), check whether the `og:image` meta tag is still present on the page
 — that's independent of the internal JSON state and could change on its
 own schedule.
+
+If alerts aren't arriving at all with no errors in the log: check that the
+external cron-job.org trigger is actually running (its own dashboard shows
+execution history), and that its GitHub token hasn't expired.
 
 ## Version log
 
@@ -301,10 +363,7 @@ mismatch on Google's own Chrome apt repository — a brief inconsistency
 on their end, confirmed transient (resolved on its own after a few
 hours). Added a 3-attempt retry with a short delay around the install
 step, with an explicit failure message if all attempts are exhausted
-(rather than silently proceeding into a confusing downstream error). The
-scheduled workflow's own 10-minute cadence was already going to recover
-from this class of issue on its own; the retry mainly cuts down on noisy
-failed runs for short-lived blips.
+(rather than silently proceeding into a confusing downstream error).
 
 **v13 — Fixed a git push race condition.** A run failed with
 `! [rejected] main -> main (fetch first)` -- caused by `main` advancing
@@ -322,4 +381,20 @@ audience can't actually watch. Changed the alert condition to require
 definition of "genuinely live" found during the original diagnostic.
 Both the raw flag and the filtered decision are logged, so a skipped
 non-public session is clearly visible rather than looking like a missed
-check.
+check. (Verified empirically: a real exclusive/`p2p` session confirmed
+`status` is literally `"p2p"`, not `"exclusive"` as initially assumed —
+irrelevant to the fix itself, since the logic denies-by-default to
+anything non-"public" rather than checking for a specific excluded term.)
+
+**v15 — Replaced GitHub's native schedule trigger with an external one.**
+Actual run timestamps showed the `*/10 * * * *` schedule firing every
+3–7 hours in practice, not every 10 minutes — confirmed as a
+long-documented, widely-reported GitHub Actions platform limitation (the
+`schedule:` trigger is explicitly "best effort" and gets throttled hard
+for public/lower-activity repos), not a bug in the workflow file.
+Practical risk: a short live session could start and end entirely
+between two actual runs, silently missing the alert. Fixed by having an
+external free scheduler (cron-job.org) call GitHub's REST API every 10
+minutes to fire `workflow_dispatch`, which — unlike the native schedule
+event — fires reliably and near-instantly. The native `schedule:` trigger
+is left in place as a harmless backup.
