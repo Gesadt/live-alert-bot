@@ -229,6 +229,17 @@ EMBED_COLOR = 0xFF3E7F  # decimal, not hex string
   URL encodes the model's fixed internal ID plus a snapshot timestamp that
   updates as Stripchat re-captures frames from the live feed, so each
   alert reflects a genuinely recent image, not a cached avatar.
+- **The snapshot is uploaded to Discord, not just linked.** At alert time
+  the script downloads the `og:image` picture and attaches it to the
+  webhook message (multipart upload, embed image set to
+  `attachment://snapshot.jpg`), so Discord hosts the file itself and old
+  alerts keep their picture indefinitely. Previously the embed only
+  linked Stripchat's short-lived image URL, which stopped loading after a
+  week or so. If the download fails for any reason, the alert still goes
+  out using the old remote-link method (log shows a `[warn] snapshot
+  download failed` line) rather than being skipped. Note: this only
+  applies to alerts sent after the update; already-expired past messages
+  can't be recovered.
 - **A failed Chromium install usually isn't your problem.** The install
   step retries 3 times with a delay before failing the job outright — this
   absorbs brief transient issues with upstream package mirrors (seen once:
@@ -398,3 +409,13 @@ external free scheduler (cron-job.org) call GitHub's REST API every 10
 minutes to fire `workflow_dispatch`, which — unlike the native schedule
 event — fires reliably and near-instantly. The native `schedule:` trigger
 is left in place as a harmless backup.
+
+**v16 — Permanent snapshots.** Alert embeds used to reference Stripchat's
+`og:image` URL directly, which Discord only proxies; once the source URL
+expired (roughly a week), the picture vanished from historical
+notifications. `send_alert()` now downloads the image at alert time
+(browser User-Agent and Referer, 15s timeout, content-type and 8 MB size
+checks) and uploads it as a multipart attachment, with the embed pointing
+at `attachment://snapshot.<ext>`, so Discord stores it permanently. Falls
+back to the old remote-link behavior if the download fails. No workflow or
+secret changes needed.
