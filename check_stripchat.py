@@ -42,6 +42,8 @@ from datetime import datetime, timezone
 
 from playwright.async_api import async_playwright
 
+import stats as stats_module
+
 # ---- Configure your models via a GitHub Secret, not here ----
 # Set a repo secret named STRIPCHAT_USERNAMES with a comma-separated list,
 # e.g. "model_one" or "model_one,model_two". This keeps the
@@ -157,6 +159,7 @@ async def check_live(browser, username: str):
 
         model["_thumbnail_url"] = og_image  # stash for send_alert to use
         model["_counts_as_live"] = is_live  # stash so main() uses the same logic
+        model["_raw_is_live"] = raw_is_live  # for stats: broadcasting but not public
         return model
     except Exception as e:
         print(f"[warn] {label}: check failed ({e})")
@@ -337,6 +340,7 @@ async def main():
 
     state = load_state()
     dirty = False
+    observations = []  # (key, "public" | "private" | "off") for stats
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -347,6 +351,12 @@ async def main():
                 continue  # leave prior known state untouched on a failed check
 
             is_live = model.get("_counts_as_live", False)
+            if is_live:
+                observations.append((key, "public"))
+            elif model.get("_raw_is_live", False):
+                observations.append((key, "private"))  # p2p / exclusive etc.
+            else:
+                observations.append((key, "off"))
             is_new_key = key not in state
             was_live = state.get(key, False)
 
@@ -373,6 +383,20 @@ async def main():
             # else: no transition, nothing to do.
 
         await browser.close()
+
+    # Optional stream statistics (private data repo + stats Discord channel).
+    # Fully isolated: any failure here must never affect alerting.
+    try:
+        stats = stats_module.Stats.from_env()
+        if stats is None:
+            print("[info] stats disabled (STATS_REPO / STATS_REPO_TOKEN not set)")
+        else:
+            labels = {state_key(u): f"Model {i + 1}" for i, u in enumerate(USERNAMES)}
+            force = os.environ.get("FORCE_REPORT", "").lower() == "true"
+            if stats.run(observations, datetime.now(timezone.utc), state, labels, force):
+                dirty = True
+    except Exception as e:
+        print(f"[warn] stats step failed ({type(e).__name__}); alerts unaffected")
 
     if dirty:
         save_state(state)
