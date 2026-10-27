@@ -2,10 +2,16 @@ name: Stripchat Live Monitor
 
 on:
   schedule:
-    # Every 10 minutes. Each run installs Chromium, so this leaves margin;
-    # tighten to */5 later if you want faster alerts (still free either way).
+    # Backup only -- GitHub's native schedule trigger is unreliable for
+    # frequent intervals on public repos (see README "Reliable triggering").
+    # The real trigger is an external cron-job.org call to workflow_dispatch.
     - cron: "*/10 * * * *"
-  workflow_dispatch: {} # lets you trigger a manual run from the Actions tab
+  workflow_dispatch: # triggered externally by cron-job.org (and manually from here)
+    inputs:
+      force_report:
+        description: "Post a preview of this week's stats report now (testing)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write # needed so the workflow can commit the updated state.json
@@ -40,6 +46,12 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           STRIPCHAT_USERNAMES: ${{ secrets.STRIPCHAT_USERNAMES }}
           DISCORD_PING: "@here" # change to a role mention, or "" for no ping
+          # Optional stream statistics -- skipped automatically if not set:
+          DISCORD_STATS_WEBHOOK_URL: ${{ secrets.DISCORD_STATS_WEBHOOK_URL }}
+          STATS_REPO: ${{ secrets.STATS_REPO }}
+          STATS_REPO_TOKEN: ${{ secrets.STATS_REPO_TOKEN }}
+          STATS_TIMEZONE: "Europe/Vilnius"
+          FORCE_REPORT: ${{ inputs.force_report }}
         run: python check_stripchat.py
 
       - name: Commit updated state
