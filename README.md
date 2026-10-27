@@ -109,11 +109,55 @@ idempotent and an extra check never causes a duplicate alert.
 | File | Purpose |
 |---|---|
 | `check_stripchat.py` | The production monitor — checks status, posts alerts. |
+| `stats.py` | Optional stream statistics: "stream ended" messages and the weekly report. Imported by `check_stripchat.py`; does nothing unless the stats secrets are set. |
 | `test_webhook.py` | Standalone script to test the Discord webhook in isolation. |
 | `test_ping.py` (optional) | Isolated test of just the `@here` mention mechanism — sends the minimum payload needed and prints Discord's `mention_everyone` ground-truth field. Not needed for normal operation; useful only if mention/ping behavior needs debugging again. |
 | `.github/workflows/monitor.yml` | Workflow that runs the monitor — triggered externally via `workflow_dispatch` (see "Reliable triggering"), with a native `schedule:` backup. |
 | `.github/workflows/test-webhook.yml` | Manual-trigger workflow to run the webhook test. |
 | `state.json` | Auto-created/committed by the workflow — tracks last-known live status per model (keyed by a hash, not the plaintext username). Don't edit by hand while the workflow is active. |
+
+## Stream statistics (optional)
+
+Tracks how long each stream lasted and posts (a) a "Stream ended" message
+after every stream and (b) a weekly report, both to a separate Discord
+channel. Alerts work exactly the same with or without it.
+
+**Where the data lives.** In a separate **private** GitHub repo
+(`data.json`), written by this workflow through a fine-grained token. It is
+deliberately *not* in this public repo, because timestamps of streams would
+reveal the model's schedule. The public repo only stores one harmless
+value in `state.json`: which week was last reported.
+
+**Secrets** (all optional; stats are skipped if `STATS_REPO` or
+`STATS_REPO_TOKEN` is missing):
+
+| Secret | Value |
+|---|---|
+| `STATS_REPO` | `owner/name` of the private data repo |
+| `STATS_REPO_TOKEN` | Fine-grained token, that repo only, *Contents: read & write* |
+| `DISCORD_STATS_WEBHOOK_URL` | Webhook of the stats channel (falls back to the alerts webhook if unset) |
+
+**How durations are measured.** Checks are snapshots ~10 minutes apart, so
+every duration is approximate. Time between snapshots is split at the
+midpoint, and half an interval is assumed before the first and after the
+last live snapshot — unbiased, accurate to about one interval overall.
+Times are shown rounded to 5 minutes.
+
+- A stream that drops and returns within 20 minutes (`STATS_MERGE_GAP_MIN`)
+  is one session, and the offline time inside it is not counted. The
+  "ended" message therefore arrives ~20–30 minutes after the stream ends.
+- **Public** vs **Private** time are tracked separately. Private is any
+  time she is broadcasting with a status other than `public` (p2p,
+  exclusive, …); it still counts toward total stream time.
+- The weekly report covers Monday–Sunday in `STATS_TIMEZONE`
+  (default `Europe/Vilnius`) and is posted by the first run after Monday
+  00:00. A stream counts in the week it *started*.
+- Manual preview: Actions → Stripchat Live Monitor → Run workflow → tick
+  "Post a preview of this week's stats report". Posts week-to-date and
+  changes no state; also proves the token and repo work.
+- If the token expires (fine-grained tokens last at most a year) the log
+  shows `[stats] couldn't load data (HTTP 401 …)`. Alerts keep working; if
+  the data file can't be read it is never overwritten.
 
 ## Setup
 
@@ -419,3 +463,14 @@ checks) and uploads it as a multipart attachment, with the embed pointing
 at `attachment://snapshot.<ext>`, so Discord stores it permanently. Falls
 back to the old remote-link behavior if the download fails. No workflow or
 secret changes needed.
+
+**v17 — Stream statistics.** New `stats.py`. Each run now records a
+public / private / offline snapshot per model into a data file in a
+separate private repo (via the GitHub Contents API). Finished sessions
+(drops under 20 minutes are merged) trigger a "Stream ended" message with
+approximate duration and public/private split, and the first run after
+Monday 00:00 (Vilnius) posts a weekly report: stream count, total,
+average, longest and a per-day breakdown. Everything is isolated in a
+try/except and gated behind new optional secrets, so alerts are unaffected
+if stats fail. `monitor.yml` gains the stats env vars plus a
+`force_report` manual input for previews.
