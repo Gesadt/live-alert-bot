@@ -35,6 +35,7 @@ import json
 import os
 import sys
 import time
+import uuid
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -127,8 +128,12 @@ async def check_live(browser, username: str):
         )
         view_cam_base, model = find_model_state(script_texts, username)
         if model is None:
+            title = await page.title()
+            html_len = len(await page.content())
             print(f"[warn] {label}: couldn't find embedded state "
-                  f"(Stripchat may have changed their page structure)")
+                  f"(Stripchat may have changed their page structure, or this "
+                  f"was a transient load issue). page_title={title!r} "
+                  f"html_length={html_len} script_blocks_found={len(script_texts)}")
             return None
 
         # The image Stripchat itself designates for link previews/SEO --
@@ -160,14 +165,80 @@ async def check_live(browser, username: str):
         await context.close()
 
 
+SNAPSHOT_MAX_BYTES = 8 * 1024 * 1024  # stay well under Discord's webhook upload limit
+SNAPSHOT_EXTENSIONS = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "image/gif": "gif",
+}
+
+
+def download_snapshot(url):
+    """Download the stream's snapshot so we can upload it to Discord ourselves.
+
+    Returns (bytes, extension) or None on any failure. Discord only *links*
+    to a remote embed image and re-fetches it through its proxy; once the
+    source URL expires (Stripchat snapshots are short-lived), old messages
+    lose the picture. Uploading the bytes as an attachment makes Discord
+    host the file itself, so it stays visible permanently.
+    """
+    if not url:
+        return None
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Referer": "https://stripchat.com/",
+                "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            ctype = (resp.headers.get_content_type() or "").lower()
+            data = resp.read(SNAPSHOT_MAX_BYTES + 1)
+        if ctype not in SNAPSHOT_EXTENSIONS:
+            print(f"[warn] snapshot download: unexpected content type {ctype!r}")
+            return None
+        if not data or len(data) > SNAPSHOT_MAX_BYTES:
+            print(f"[warn] snapshot download: bad size ({len(data)} bytes)")
+            return None
+        return data, SNAPSHOT_EXTENSIONS[ctype]
+    except Exception as e:
+        print(f"[warn] snapshot download failed ({e}); falling back to remote image URL")
+        return None
+
+
+def build_multipart(payload_obj, file_name, file_bytes, file_type):
+    """Build a multipart/form-data body: payload_json + files[0]."""
+    boundary = "----alertbot" + uuid.uuid4().hex
+    crlf = b"\r\n"
+    parts = [
+        b"--" + boundary.encode(),
+        b'Content-Disposition: form-data; name="payload_json"',
+        b"Content-Type: application/json",
+        b"",
+        json.dumps(payload_obj).encode(),
+        b"--" + boundary.encode(),
+        f'Content-Disposition: form-data; name="files[0]"; filename="{file_name}"'.encode(),
+        f"Content-Type: {file_type}".encode(),
+        b"",
+        file_bytes,
+        b"--" + boundary.encode() + b"--",
+        b"",
+    ]
+    return crlf.join(parts), f"multipart/form-data; boundary={boundary}"
+
+
 def send_alert(username: str, model: dict) -> bool:
     """Post a 'went live' embed to Discord. Returns True only on confirmed
     success, so the caller can decide whether it's safe to update state.
 
-    The thumbnail is set explicitly from the page's own og:image meta tag
-    (stashed on model["_thumbnail_url"] by check_live) rather than relying
-    on Discord auto-unfurling a plain URL -- that was unreliable in
-    testing and depends on Discord's own crawler succeeding independently.
+    The snapshot comes from the page's own og:image meta tag (stashed on
+    model["_thumbnail_url"] by check_live). We download it at alert time and
+    upload it to Discord as an attachment so Discord hosts the image
+    permanently; if the download fails we fall back to linking the remote
+    URL (which works for a while, then expires) rather than skipping the alert.
     """
     if not WEBHOOK_URL:
         print("[error] DISCORD_WEBHOOK_URL is not set, skipping notification")
@@ -183,11 +254,19 @@ def send_alert(username: str, model: dict) -> bool:
         "footer": {"text": "Stripchat Alerts"},
     }
     thumbnail_url = model.get("_thumbnail_url")
-    if thumbnail_url:
+    snapshot = download_snapshot(thumbnail_url)
+    attachment = None
+    if snapshot:
+        data, ext = snapshot
+        file_name = f"snapshot.{ext}"
+        embed["image"] = {"url": f"attachment://{file_name}"}
+        attachment = (file_name, data, f"image/{'jpeg' if ext == 'jpg' else ext}")
+        print(f"[info] snapshot downloaded ({len(data)} bytes), uploading as attachment")
+    elif thumbnail_url:
         embed["image"] = {"url": thumbnail_url}
 
     content = f"{PING_TEXT} {profile_url}".strip() if PING_TEXT else profile_url
-    payload = json.dumps({
+    payload_obj = {
         "content": content,
         "username": "Stripchat Alerts",
         "embeds": [embed],
@@ -198,14 +277,18 @@ def send_alert(username: str, model: dict) -> bool:
         # DISCORD_PING (an env var/secret), not any user-generated content,
         # so broadly allowing these two types here is safe.
         "allowed_mentions": {"parse": ["everyone", "roles"]},
-    }).encode()
+    }
+    if attachment:
+        body, content_type = build_multipart(payload_obj, *attachment)
+    else:
+        body, content_type = json.dumps(payload_obj).encode(), "application/json"
 
     for attempt in range(1, WEBHOOK_RETRIES + 1):
         req = urllib.request.Request(
             WEBHOOK_URL,
-            data=payload,
+            data=body,
             headers={
-                "Content-Type": "application/json",
+                "Content-Type": content_type,
                 "User-Agent": USER_AGENT,
             },
             method="POST",
