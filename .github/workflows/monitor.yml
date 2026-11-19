@@ -23,6 +23,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
 
@@ -33,12 +34,41 @@ jobs:
       - name: Install Playwright + Chromium
         run: |
           pip install playwright
+
+          # 1) The browser binary comes from Playwright's own CDN (not apt),
+          #    so this is unaffected by Ubuntu mirror outages.
+          ok=0
           for i in 1 2 3; do
-            playwright install --with-deps chromium && exit 0
-            echo "Install attempt $i failed (likely a transient apt mirror issue) -- retrying in 15s..."
+            playwright install chromium && ok=1 && break
+            echo "Browser download attempt $i failed -- retrying in 15s..."
             sleep 15
           done
-          echo "All 3 install attempts failed -- failing this step explicitly."
+          if [ "$ok" != 1 ]; then
+            echo "Could not download Chromium after 3 attempts."
+            exit 1
+          fi
+
+          # 2) GitHub's runner image normally already has every system library
+          #    Chromium needs. Only touch apt (slow, and the part that failed
+          #    during an Ubuntu mirror outage) if a test launch actually fails.
+          launch_test() {
+            python - <<'PY'
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as p:
+              p.chromium.launch().close()
+          PY
+          }
+          if launch_test; then
+            echo "Chromium launches fine -- no system packages needed."
+            exit 0
+          fi
+          echo "Chromium failed to launch -- installing system dependencies via apt..."
+          for i in 1 2 3; do
+            playwright install-deps chromium && launch_test && exit 0
+            echo "Dependency install attempt $i failed (likely a transient apt mirror issue) -- retrying in 30s..."
+            sleep 30
+          done
+          echo "Chromium still unusable after 3 dependency attempts."
           exit 1
 
       - name: Check Stripchat status
